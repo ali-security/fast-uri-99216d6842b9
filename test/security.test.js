@@ -131,3 +131,134 @@ test('normalize does not double-decode %2540 into a live @', (t) => {
   t.plan(1)
   t.notEqual(parsed.host, 'trusted.com@evil.com', 'http://trusted.com%2540evil.com/')
 })
+
+test('parse canonicalises IDN / Unicode hosts to their ASCII form', (t) => {
+  const cases = [
+    {
+      input: 'http://127。0。0。1/',
+      expectedHost: '127.0.0.1',
+      description: 'full-width ideographic stops as octet separators'
+    },
+    {
+      input: 'http://ｅxample.com/',
+      expectedHost: 'example.com',
+      description: 'fullwidth e as first letter'
+    },
+    {
+      input: 'http://納豆.example.org/',
+      expectedHost: 'xn--99zt52a.example.org',
+      description: 'CJK label requiring punycode'
+    }
+  ]
+
+  t.plan(cases.length * 2)
+
+  cases.forEach(({ input, expectedHost, description }) => {
+    const parsed = fastURI.parse(input)
+    t.notOk(parsed.error, `parse should not set error: ${description}`)
+    t.equal(parsed.host, expectedHost, `host canonicalised to ASCII: ${description}`)
+  })
+})
+
+test('resolve canonicalises the host using the final resolved scheme', (t) => {
+  const cases = [
+    {
+      base: 'http://trusted.example/base',
+      relative: '//127\u30020\u30020\u30021/private',
+      expected: 'http://127.0.0.1/private',
+      expectedHost: '127.0.0.1',
+      description: 'scheme-relative loopback host'
+    },
+    {
+      base: 'https://ex\u00ADample.com/base',
+      relative: 'child',
+      expected: 'https://example.com/child',
+      expectedHost: 'example.com',
+      description: 'host inherited from the base'
+    },
+    {
+      base: 'http://trusted.example/base',
+      relative: 'http://ex\u200Bample.com/',
+      expected: 'http://example.com/',
+      expectedHost: 'example.com',
+      description: 'absolute relative reference'
+    }
+  ]
+
+  t.plan(cases.length * 2)
+
+  cases.forEach(({ base, relative, expected, expectedHost, description }) => {
+    const resolved = fastURI.resolve(base, relative)
+    t.equal(resolved, expected, description)
+    t.equal(fastURI.parse(resolved).host, expectedHost, `${description} reparses consistently`)
+  })
+})
+
+test('resolve applies domain canonicalisation only when the effective scheme opts in', (t) => {
+  const host = 'ex\u00ADample.com'
+
+  t.plan(2)
+  t.equal(
+    fastURI.resolve('uri://trusted.example/', `//${host}/`),
+    `uri://${host}/`,
+    'an unsupported scheme preserves the host'
+  )
+  t.equal(
+    fastURI.resolve('http://trusted.example/', `//${host}/`, { unicodeSupport: true }),
+    `http://${host}/`,
+    'unicodeSupport preserves the Unicode host'
+  )
+})
+
+test('resolve throws when the final scheme cannot canonicalise the host', (t) => {
+  const invalidHost = '\u200D.example'
+  const cases = [
+    ['http://trusted.example/', `//${invalidHost}/`],
+    [`https://${invalidHost}/base`, 'child'],
+    ['http://trusted.example/', `http://${invalidHost}/`],
+    ['http://trusted.example/', `//${invalidHost}%2Etest/`]
+  ]
+
+  t.plan(cases.length)
+
+  cases.forEach(([base, relative]) => {
+    t.throws(
+      () => fastURI.resolve(base, relative),
+      /Host's domain name can not be converted to ASCII/,
+      `${base} + ${relative}`
+    )
+  })
+})
+
+test('normalize and equal do not desynchronize on IDN / Unicode hosts', (t) => {
+  const cases = [
+    {
+      input: 'http://127\u30020\u30020\u30021/',
+      canonical: 'http://127.0.0.1/',
+      description: 'full-width ideographic stops as octet separators'
+    },
+    {
+      input: 'http://\uFF45xample.com/',
+      canonical: 'http://example.com/',
+      description: 'fullwidth e as first letter'
+    },
+    {
+      input: 'ws://\u7D0D\u8C46.example.org/chat',
+      canonical: 'ws://xn--99zt52a.example.org/chat',
+      description: 'CJK label requiring punycode'
+    }
+  ]
+
+  t.plan(cases.length * 2 + 1)
+
+  cases.forEach(({ input, canonical, description }) => {
+    t.equal(fastURI.normalize(input), canonical, `normalize canonicalises host: ${description}`)
+    t.equal(fastURI.equal(input, canonical), true, `equal sees the canonical host: ${description}`)
+  })
+
+  t.equal(
+    fastURI.parse('foo://127\u30020\u30020\u30021/', { domainHost: true }).host,
+    '127.0.0.1',
+    'domainHost option canonicalises hosts on any scheme'
+  )
+})
