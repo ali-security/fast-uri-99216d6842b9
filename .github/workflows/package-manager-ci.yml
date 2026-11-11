@@ -1,24 +1,17 @@
 name: package-manager-ci
 
+# Dispatch-only on the sealed-package CI fork: the push / pull_request
+# triggers would fire this workflow on the fork push. It is not a build target
+# (its single job is disabled below), so it must never run on its own.
 on:
-  push:
-    branches:
-     - main
-     - next
-     - 'v*'
-    paths-ignore:
-      - 'docs/**'
-      - '*.md'
-  pull_request:
-    paths-ignore:
-      - 'docs/**'
-      - '*.md'
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   test:
+    if: false
     permissions:
       contents: read
     uses: fastify/workflows/.github/workflows/plugins-ci-package-manager.yml@v6

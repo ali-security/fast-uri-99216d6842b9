@@ -1,18 +1,16 @@
 name: CI
 
+# Dispatch-only on the sealed-package CI fork: the `push` / `pull_request`
+# triggers would fire on the fork push and burn runners on a run nobody asked
+# for. Everything below is dispatched explicitly instead.
 on:
-  push:
-    branches:
-     - main
-     - next
-     - 'v*'
-    paths-ignore:
-      - 'docs/**'
-      - '*.md'
-  pull_request:
-    paths-ignore:
-      - 'docs/**'
-      - '*.md'
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: 'Optional tape file glob; empty runs the full suite.'
+        required: false
+        type: string
+        default: ''
 
 # This allows a subsequently queued workflow run to interrupt previous runs
 concurrency:
@@ -26,9 +24,21 @@ jobs:
   test-regression-check-node10:
     name: Test compatibility with Node.js 10
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
+      # Pin the registry to the package's release date so `npm install`
+      # resolves the dependency versions that existed then. The two-command
+      # form works on npm 6 (Node 10) through npm 11, and writes the
+      # user-level ~/.npmrc, which survives actions/setup-node. It must run
+      # before checkout so the repo .npmrc (which sets no registry) is not
+      # involved.
+      - name: Configure npm time machine registry
+        run: |
+          npm config set registry https://time-machines-npm.sealsecurity.io/
+          npm config set //time-machines-npm.sealsecurity.io/:_authToken=2026-05-05T08:31:31.849000Z
+
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
@@ -51,15 +61,36 @@ jobs:
           cp -r ./lib ./node_modules/fast-uri/lib &&
           cp ./index.js ./node_modules/fast-uri/index.js
 
+      # `npm run test:unit` cannot be used on this leg: Node 10 ships npm 6,
+      # which honours the repo .npmrc's `ignore-scripts=true` for directly
+      # invoked run-scripts too, so the command exits 0 with ZERO output and
+      # the leg silently tests nothing. Invoking the tape CLI directly runs
+      # the exact same 12 test files / 787 assertions with nothing masked.
+      # The glob stays quoted so tape's own glob.sync() expands it rather
+      # than the shell.
       - name: Run tests
+        if: ${{ inputs.test-filter == '' }}
         run: |
-          npm run test:unit
+          node ./node_modules/.bin/tape "test/**/*.js"
         env:
           NODE_OPTIONS: no-network-family-autoselection
 
+      - name: Run tests (filtered)
+        if: ${{ inputs.test-filter != '' }}
+        run: |
+          node ./node_modules/.bin/tape "${{ inputs.test-filter }}"
+        env:
+          NODE_OPTIONS: no-network-family-autoselection
+
+  # Disabled on the fork: this job runs the SAME tape test files as the `test`
+  # matrix below, only inside a browser engine. The playwright engines are
+  # large runtime downloads that are unreliable on fork runners, so the job is
+  # skipped — no test FILE is lost, only the browser environment.
   test-browser:
+    if: false
     name: Test browser compatibility
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -93,14 +124,89 @@ jobs:
         run: |
           npm run test:browser:${{ matrix.browser }}
 
+  # Upstream delegates this job to the reusable
+  # fastify/workflows/.github/workflows/plugins-ci.yml@v6 via `uses:`, but
+  # GitHub forbids `timeout-minutes` on a `uses:` job, which makes it
+  # undispatchable here. The reusable workflow's own `test` job is therefore
+  # inlined verbatim below, with the caller's `node-versions` matrix
+  # ('["16", "18", "20", "22", "24"]') preserved. The caller's
+  # `license-check: true` / `lint: true` quality gates are intentionally not
+  # carried over: linting and licence checking are not tests and must not gate
+  # this build.
   test:
+    name: test (${{ matrix.os }}, node ${{ matrix.node-version }})
     needs:
       - test-regression-check-node10
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     permissions:
-      contents: write
-      pull-requests: write
-    uses: fastify/workflows/.github/workflows/plugins-ci.yml@v6
-    with:
-      license-check: true
-      lint: true
-      node-versions: '["16", "18", "20", "22", "24"]'
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ['16', '18', '20', '22', '24']
+        os: [macos-latest, ubuntu-latest, windows-latest]
+        exclude:
+          - os: macos-latest
+            node-version: '16'
+    steps:
+      - name: Configure npm time machine registry
+        run: |
+          npm config set registry https://time-machines-npm.sealsecurity.io/
+          npm config set //time-machines-npm.sealsecurity.io/:_authToken=2026-05-05T08:31:31.849000Z
+
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Install
+        run: npm i --ignore-scripts
+
+      - name: Test
+        if: ${{ inputs.test-filter == '' }}
+        run: npm test
+
+      - name: Test (filtered)
+        if: ${{ inputs.test-filter != '' }}
+        run: npx tape "${{ inputs.test-filter }}"
+
+  # `npm pack` of the repo is the whole artifact: package.json declares no
+  # build/prepare script, so there is nothing to compile first. npm 11.13.0 is
+  # installed immediately before packing (and not at job start, where it would
+  # also affect installs) because that is the npm that produced the public
+  # tarball, and npm pack's always-include member set differs across majors.
+  pack:
+    name: Pack npm tarball
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Configure npm time machine registry
+        run: |
+          npm config set registry https://time-machines-npm.sealsecurity.io/
+          npm config set //time-machines-npm.sealsecurity.io/:_authToken=2026-05-05T08:31:31.849000Z
+
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
+      - name: Install the npm that produced the published tarball
+        run: npm i -g npm@11.13.0
+
+      - name: Pack
+        run: npm pack --ignore-scripts
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-tarball
+          path: fast-uri-*.tgz
+          if-no-files-found: error

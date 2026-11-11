@@ -1,8 +1,8 @@
 name: Lock Threads
 
+# Dispatch-only on the sealed-package CI fork: the monthly schedule would run
+# issue/PR locking against the fork. Not a build target.
 on:
-  schedule:
-    - cron: '0 0 1 * *'
   workflow_dispatch:
 
 concurrency:
